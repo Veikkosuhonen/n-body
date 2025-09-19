@@ -50,7 +50,7 @@ async function main() {
   });
   observer.observe(canvasEl);
 
-  const numParticles = 60_000;
+  const numParticles = 50_000;
   const WORKGROUP_TILE_SIZE = 512;
 
   const structSize = 2 * 2; // floats
