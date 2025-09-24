@@ -1,4 +1,6 @@
 import "./style.css";
+import rawShaders from "./shaders.wgsl?raw";
+import { defineValues } from "./util";
 
 const canvasEl = document.querySelector("canvas")!;
 const timingInfoEl = document.querySelector("#timing-info")!;
@@ -19,10 +21,10 @@ async function main() {
   }
 
   const device = await adapter.requestDevice({
-    requiredFeatures: ["timestamp-query", "shader-f16"],
+    requiredFeatures: ["timestamp-query"],
     requiredLimits: {
-      maxComputeWorkgroupSizeX: 1024,
-      maxComputeInvocationsPerWorkgroup: 1024,
+      // maxComputeWorkgroupSizeX: 1024,
+      // maxComputeInvocationsPerWorkgroup: 1024,
     },
   });
 
@@ -31,6 +33,7 @@ async function main() {
   context.configure({
     device: device,
     format: canvasFormat,
+    alphaMode: "premultiplied",
   });
 
   const observer = new ResizeObserver((entries) => {
@@ -51,19 +54,24 @@ async function main() {
   observer.observe(canvasEl);
 
   const numParticles = 50_000;
-  const WORKGROUP_TILE_SIZE = 512;
+  const WORKGROUP_SIZE = 256;
+  const shaders = defineValues(rawShaders, {
+    N: numParticles,
+    WORKGROUP_SIZE,
+    TILE_SIZE: WORKGROUP_SIZE,
+  });
 
   const structSize = 2 * 2; // floats
 
   const initialParticleData = new Float32Array(numParticles * structSize);
   for (let i = 0; i < numParticles; ++i) {
     const randomAngle1 = 2 * Math.PI * Math.random();
-    const randomRadius = 0.1 + 0.8 * Math.random();
+    const randomRadius = 0.1 + 0.7 * Math.random();
 
     const x = randomRadius * Math.cos(randomAngle1);
     const y = randomRadius * Math.sin(randomAngle1);
 
-    const speed = 400.0 * randomRadius;
+    const speed = 220.0 * randomRadius + 10;
     const vx = -speed * Math.sin(randomAngle1);
     const vy = speed * Math.cos(randomAngle1);
 
@@ -73,6 +81,8 @@ async function main() {
     // vel
     initialParticleData[structSize * i + 2] = vx;
     initialParticleData[structSize * i + 3] = vy;
+    // mass
+    // initialParticleData[structSize * i + 4] = 1.0;
   }
 
   const particlesBufferA = device.createBuffer({
@@ -159,152 +169,22 @@ async function main() {
     bindGroupLayouts: [bindGroupLayout],
   });
 
-  const cShader = `
-    struct Particle {
-        pos: vec2<f32>,
-        vel: vec2<f32>,
-    }
-
-    const N = ${numParticles}u;
-
-    @group(0) @binding(0) var<storage, read> input_particles: array<Particle>;
-    @group(0) @binding(1) var<storage, read_write> output_particles: array<Particle>;
-
-    var<workgroup> tile: array<Particle, ${WORKGROUP_TILE_SIZE}>;
-
-    const TILE_SIZE = ${WORKGROUP_TILE_SIZE}u;
-
-    @compute @workgroup_size(${WORKGROUP_TILE_SIZE})
-    fn main(
-      @builtin(global_invocation_id) global_id: vec3<u32>,
-      @builtin(local_invocation_id) local_id: vec3<u32>
-    ) {
-        let current_particle = input_particles[global_id.x];
-        var force = vec2<f32>(0.0, 0.0);
-
-        let dt = 0.00001;
-        let softening = 0.01;
-
-        for (var tile_start = 0u; tile_start < N; tile_start += TILE_SIZE) {
-            // Load tile into shared memory
-            let idx = tile_start + local_id.x;
-            if (idx < N) {
-                tile[local_id.x] = input_particles[idx];
-            }
-            workgroupBarrier();
-
-            // Interact with particles in tile
-            let tile_size = min(TILE_SIZE, N - tile_start);
-
-            for (var j = 0u; j < tile_size; j = j + 1u) {
-                if (tile_start + j == global_id.x) {
-                    continue;
-                }
-
-                let other_particle = tile[j];
-
-                let dp = other_particle.pos - current_particle.pos;
-                let dist_sq = dot(dp, dp);
-                let inv_dist = 1.0 / sqrt(dist_sq + softening);
-                let inv_dist_cubed = inv_dist * inv_dist * inv_dist;
-                force += dp * inv_dist_cubed;
-            }
-
-            // workgroupBarrier();
-        }
-
-        var new_vel = current_particle.vel + dt * force;
-        var new_pos = current_particle.pos + dt * new_vel;
-
-        output_particles[global_id.x].pos = new_pos;
-        output_particles[global_id.x].vel = new_vel;
-    }`;
-
-  const cShader2 = `
-    struct Particle {
-        pos: vec2<f32>,
-        vel: vec2<f32>,
-    }
-
-    const N = ${numParticles}u;
-
-    @group(0) @binding(0) var<storage, read> input_particles: array<Particle>;
-    @group(0) @binding(1) var<storage, read_write> output_particles: array<Particle>;
-
-    @compute @workgroup_size(${WORKGROUP_TILE_SIZE})
-    fn main(
-      @builtin(global_invocation_id) global_id: vec3<u32>,
-    ) {
-        let i = global_id.x;
-        if (i >= N) {
-            return;
-        }
-
-        let current_particle = input_particles[i];
-        var force = vec2<f32>(0.0, 0.0);
-
-        let dt = 0.00001;
-        let softening = 0.01;
-
-        for (var j = 0u; j < N; j = j + 1u) {
-            if (j == i) {
-                continue;
-            }
-
-            let other_particle = input_particles[j];
-
-            let dp = other_particle.pos - current_particle.pos;
-            let dist_sq = dot(dp, dp);
-            let inv_dist = 1.0 / sqrt(dist_sq + softening);
-            let inv_dist_cubed = inv_dist * inv_dist * inv_dist;
-            force += dp * inv_dist_cubed;
-        }
-
-        var new_vel = current_particle.vel + dt * force;
-        var new_pos = current_particle.pos + dt * new_vel;
-
-        output_particles[i].pos = new_pos;
-        output_particles[i].vel = new_vel;
-    }`;
-
   const computeShaderModule = device.createShaderModule({
     label: "Compute shader",
-    code: cShader2,
+    code: shaders,
   });
 
   const computePipeline = device.createComputePipeline({
     layout: pipelineLayout,
     compute: {
       module: computeShaderModule,
-      entryPoint: "main",
+      entryPoint: "n_body_sim_main",
     },
   });
 
   const renderShaderModule = device.createShaderModule({
     label: "Render shader",
-    code: `
-            // enable f16;
-
-            const particle_size = 0.0005;
-            const quad_offsets = array<vec2<f32>, 6>(
-                vec2<f32>(-particle_size, -particle_size),
-                vec2<f32>( particle_size, -particle_size),
-                vec2<f32>(-particle_size,  particle_size),
-                vec2<f32>(-particle_size,  particle_size),
-                vec2<f32>( particle_size, -particle_size),
-                vec2<f32>( particle_size,  particle_size)
-            );
-
-            @vertex
-            fn vs_main(@location(0) in_pos: vec2<f32>, @builtin(vertex_index) vertex_id : u32) -> @builtin(position) vec4<f32> {
-                return vec4<f32>(in_pos + quad_offsets[vertex_id], 0.0, 1.0);
-            }
-
-            @fragment
-            fn fs_main() -> @location(0) vec4<f32> {
-                return vec4<f32>(1.0, 1.0, 1.0, 1.0);
-            }
-        `,
+    code: shaders,
   });
 
   const renderPipeline = device.createRenderPipeline({
@@ -313,7 +193,7 @@ async function main() {
     }),
     vertex: {
       module: renderShaderModule,
-      entryPoint: "vs_main",
+      entryPoint: "particle_vs_main",
       buffers: [
         {
           arrayStride: structSize * 4,
@@ -324,21 +204,43 @@ async function main() {
               offset: 0,
               format: "float32x2",
             },
+            {
+              shaderLocation: 1,
+              offset: 2 * 4, // pos
+              format: "float32x2",
+            },
+            /*{
+              shaderLocation: 2,
+              offset: 2 * 2 * 4, // pos + vel
+              format: "float32",
+            },*/
           ],
         },
       ],
     },
     fragment: {
       module: renderShaderModule,
-      entryPoint: "fs_main",
+      entryPoint: "particle_fs_main",
       targets: [
         {
           format: canvasFormat,
+          blend: {
+            color: {
+              operation: "add",
+              srcFactor: "one",
+              dstFactor: "one",
+            },
+            alpha: {
+              operation: "add",
+              srcFactor: "one",
+              dstFactor: "one",
+            },
+          },
         },
       ],
     },
     primitive: {
-      topology: "line-list",
+      topology: "triangle-list",
     },
   });
 
@@ -360,9 +262,7 @@ async function main() {
     } else {
       computePass.setBindGroup(0, bindGroupB);
     }
-    computePass.dispatchWorkgroups(
-      Math.ceil(numParticles / WORKGROUP_TILE_SIZE),
-    );
+    computePass.dispatchWorkgroups(Math.ceil(numParticles / WORKGROUP_SIZE));
     computePass.end();
 
     const renderPass = encoder.beginRenderPass({
