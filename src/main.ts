@@ -1,6 +1,14 @@
+import {
+  makeShaderDataDefinitions,
+  makeStructuredView,
+} from 'webgpu-utils';
+
 import "./style.css";
-import rawShaders from "./shaders.wgsl?raw";
+import renderShaders from "./render.wgsl?raw";
+import rawComputeShaders from "./compute.wgsl?raw";
 import { defineValues } from "./util";
+import { Camera } from "./camera";
+import { vec2, vec3 } from 'webgpu-matrix';
 
 const canvasEl = document.querySelector("canvas")!;
 const timingInfoEl = document.querySelector("#timing-info")!;
@@ -22,10 +30,6 @@ async function main() {
 
   const device = await adapter.requestDevice({
     requiredFeatures: ["timestamp-query"],
-    requiredLimits: {
-      // maxComputeWorkgroupSizeX: 1024,
-      // maxComputeInvocationsPerWorkgroup: 1024,
-    },
   });
 
   const context = canvasEl.getContext("webgpu")!;
@@ -34,6 +38,41 @@ async function main() {
     device: device,
     format: canvasFormat,
     alphaMode: "premultiplied",
+  });
+
+  const camera = new Camera();
+  camera.zoom = 50.0;
+  camera.pan = vec3.fromValues(window.innerWidth/2, window.innerHeight/2, 0);
+
+  let isDragging = false;
+  canvasEl.addEventListener("mousedown", (e) => {
+    if (e.button === 0) {
+      isDragging = true;
+    }
+  });
+  canvasEl.addEventListener("mouseup", (e) => {
+    if (e.button === 0) {
+      isDragging = false;
+    }
+  });
+  canvasEl.addEventListener("mousemove", (e) => {
+    if (isDragging) {
+      console.log(e.movementX, e.movementY, camera.zoom)
+      const pan = vec3.fromValues(
+        (2 * e.movementX),
+        (2 * e.movementY),
+        0
+      );
+      // vec3.scale(pan, 1 / camera.zoom, pan);
+      vec3.add(camera.pan, pan, camera.pan);
+    }
+  });
+  canvasEl.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Zoom towards cursor
+    const zoomFactor = e.deltaY < 0 ? 1.01 : 1 / 1.01;
+    camera.zoom *= zoomFactor;
   });
 
   const observer = new ResizeObserver((entries) => {
@@ -53,36 +92,37 @@ async function main() {
   });
   observer.observe(canvasEl);
 
-  const numParticles = 50_000;
+  const numParticles = 40_000;
   const WORKGROUP_SIZE = 256;
-  const shaders = defineValues(rawShaders, {
+  const computeShaders = defineValues(rawComputeShaders, {
     N: numParticles,
     WORKGROUP_SIZE,
     TILE_SIZE: WORKGROUP_SIZE,
   });
+
+  const computeShaderDefs = makeShaderDataDefinitions(computeShaders);
+  const renderShaderDefs = makeShaderDataDefinitions(renderShaders);
+  const globalsUniformView = makeStructuredView(renderShaderDefs.uniforms.globals);
+  console.log(renderShaderDefs)
 
   const structSize = 2 * 2; // floats
 
   const initialParticleData = new Float32Array(numParticles * structSize);
   for (let i = 0; i < numParticles; ++i) {
     const randomAngle1 = 2 * Math.PI * Math.random();
-    const randomRadius = 0.1 + 0.7 * Math.random();
+    const randomRadius = 0.3 + 0.6 * Math.random();
 
-    const x = randomRadius * Math.cos(randomAngle1);
-    const y = randomRadius * Math.sin(randomAngle1);
+    const x = 10 * randomRadius * Math.cos(randomAngle1);
+    const y = 10 * randomRadius * Math.sin(randomAngle1);
 
-    const speed = 220.0 * randomRadius + 10;
+    const speed = 15 + 40.0 * randomRadius;
     const vx = -speed * Math.sin(randomAngle1);
     const vy = speed * Math.cos(randomAngle1);
 
-    // pos
     initialParticleData[structSize * i + 0] = x;
     initialParticleData[structSize * i + 1] = y;
-    // vel
     initialParticleData[structSize * i + 2] = vx;
     initialParticleData[structSize * i + 3] = vy;
-    // mass
-    // initialParticleData[structSize * i + 4] = 1.0;
   }
 
   const particlesBufferA = device.createBuffer({
@@ -100,6 +140,12 @@ async function main() {
       GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
 
+  const globalsBuffer = device.createBuffer({
+    label: "Globals buffer",
+    size: globalsUniformView.arrayBuffer.byteLength,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
   const querySet = device.createQuerySet({ type: "timestamp", count: 4 });
   const queryBuffer = device.createBuffer({
     size: querySet.count * 8,
@@ -110,87 +156,89 @@ async function main() {
     usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
   });
 
-  const bindGroupLayout = device.createBindGroupLayout({
+  const computeBindGroupLayout = device.createBindGroupLayout({
+    label: "Compute bind group",
     entries: [
       {
         binding: 0,
         visibility: GPUShaderStage.COMPUTE,
-        buffer: {
-          type: "read-only-storage",
-        },
+        buffer: { type: "read-only-storage" },
       },
       {
         binding: 1,
         visibility: GPUShaderStage.COMPUTE,
-        buffer: {
-          type: "storage",
-        },
+        buffer: { type: "storage" },
+      },
+    ],
+  });
+
+  const renderBindGroupLayout = device.createBindGroupLayout({
+    label: "Render bind group",
+    entries: [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.VERTEX,
+        buffer: { type: "uniform" },
       },
     ],
   });
 
   const bindGroupA = device.createBindGroup({
-    layout: bindGroupLayout,
+    label: "Compute bind group A",
+    layout: computeBindGroupLayout,
     entries: [
-      {
-        binding: 0,
-        resource: {
-          buffer: particlesBufferA,
-        },
-      },
-      {
-        binding: 1,
-        resource: {
-          buffer: particlesBufferB,
-        },
-      },
+      { binding: 0, resource: { buffer: particlesBufferA } },
+      { binding: 1, resource: { buffer: particlesBufferB } },
     ],
   });
 
   const bindGroupB = device.createBindGroup({
-    layout: bindGroupLayout,
+    label: "Bind group B",
+    layout: computeBindGroupLayout,
     entries: [
-      {
-        binding: 0,
-        resource: {
-          buffer: particlesBufferB,
-        },
-      },
-      {
-        binding: 1,
-        resource: {
-          buffer: particlesBufferA,
-        },
-      },
+      { binding: 0, resource: { buffer: particlesBufferB } },
+      { binding: 1, resource: { buffer: particlesBufferA } },
     ],
   });
 
-  const pipelineLayout = device.createPipelineLayout({
-    bindGroupLayouts: [bindGroupLayout],
+  const renderBindGroup = device.createBindGroup({
+    label: "Render bind group",
+    layout: renderBindGroupLayout,
+    entries: [{ binding: 0, resource: { buffer: globalsBuffer } }],
+  });
+
+  const computePipelineLayout = device.createPipelineLayout({
+    label: "Compute pipeline layout",
+    bindGroupLayouts: [computeBindGroupLayout],
+  });
+
+  const renderPipelineLayout = device.createPipelineLayout({
+    label: "Render pipeline layout",
+    bindGroupLayouts: [renderBindGroupLayout],
   });
 
   const computeShaderModule = device.createShaderModule({
     label: "Compute shader",
-    code: shaders,
+    code: computeShaders,
   });
 
   const computePipeline = device.createComputePipeline({
-    layout: pipelineLayout,
+    label: "Compute pipeline",
+    layout: computePipelineLayout,
     compute: {
       module: computeShaderModule,
-      entryPoint: "n_body_sim_main",
+      entryPoint: "n_body_sim_tiled_main",
     },
   });
 
   const renderShaderModule = device.createShaderModule({
     label: "Render shader",
-    code: shaders,
+    code: renderShaders,
   });
 
   const renderPipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({
-      bindGroupLayouts: [],
-    }),
+    label: "Render pipeline",
+    layout: renderPipelineLayout,
     vertex: {
       module: renderShaderModule,
       entryPoint: "particle_vs_main",
@@ -199,21 +247,8 @@ async function main() {
           arrayStride: structSize * 4,
           stepMode: "instance",
           attributes: [
-            {
-              shaderLocation: 0,
-              offset: 0,
-              format: "float32x2",
-            },
-            {
-              shaderLocation: 1,
-              offset: 2 * 4, // pos
-              format: "float32x2",
-            },
-            /*{
-              shaderLocation: 2,
-              offset: 2 * 2 * 4, // pos + vel
-              format: "float32",
-            },*/
+            { shaderLocation: 0, offset: 0, format: "float32x2" },
+            { shaderLocation: 1, offset: 2 * 4, format: "float32x2" },
           ],
         },
       ],
@@ -247,6 +282,14 @@ async function main() {
   let frameNum = 0;
 
   async function frame() {
+    const viewportSize = vec2.fromValues(canvasEl.width, canvasEl.height);
+    const viewMatrix = camera.getViewMatrix(viewportSize);
+    globalsUniformView.set({
+      view_matrix: viewMatrix,
+    });
+    // console.log(globalsUniformView.arrayBuffer)
+    device.queue.writeBuffer(globalsBuffer, 0, globalsUniformView.arrayBuffer);
+
     const encoder = device.createCommandEncoder();
 
     const computePass = encoder.beginComputePass({
@@ -281,6 +324,7 @@ async function main() {
       },
     });
     renderPass.setPipeline(renderPipeline);
+    renderPass.setBindGroup(0, renderBindGroup);
     if (frameNum % 2 === 0) {
       renderPass.setVertexBuffer(0, particlesBufferB);
     } else {

@@ -5,9 +5,36 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>N body simulation</title>
     </head>
+    <style>
+        @keyframes fade {
+            0% {
+                opacity: 1;
+            }
+            100% {
+                opacity: 0;
+                display: none;
+            }
+        }
+        .centerText {
+            position: absolute;
+            font-size: large;
+            top: 45vh;
+            left: 45vw;
+            color: white;
+            white-space: pre-wrap;
+            text-align: center;
+            animation: fade 3s ease-in-out 3s 1 normal forwards;
+        }
+    </style>
     <body>
         <canvas id="canvas"></canvas>
         <div id="timing-info" style="position: absolute; top: 10px; left: 10px; color: white; font-family: monospace;"></div>
+        <p class="centerText">
+            N = 40_000
+            
+            Drag to pan
+            Scroll to zoom
+        </p>
         <script type="module" src="/src/main.ts"></script>
     </body>
 </html>

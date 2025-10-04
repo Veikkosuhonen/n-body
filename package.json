@@ -16,6 +16,7 @@
     "@webgpu/types": "^0.1.61"
   },
   "dependencies": {
-    "webgpu-utils": "^1.10.3"
+    "webgpu-matrix": "^1.0.0",
+    "webgpu-utils": "^2.0.2"
   }
 }

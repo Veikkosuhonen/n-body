@@ -1,0 +1,10 @@
+[package]
+name = "wgpu-n-body"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+env_logger = "0.11"
+pollster = "0.4"
+wgpu = "26.0.1"
+winit = { version = "0.30.8", features = [] }
